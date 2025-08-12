@@ -5,3 +5,4 @@ textblob
 nltk
 langchain
 langchain-openai
+openai

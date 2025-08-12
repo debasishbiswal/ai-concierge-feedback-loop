@@ -14,6 +14,7 @@ from typing import List, Dict
 import numpy as np
 import pandas as pd
 import streamlit as st
+import os
 from textblob import TextBlob
 
 # New imports for LangChain/OpenAI integration
@@ -324,7 +325,18 @@ def main() -> None:
         "Enhance your exploration by using a large language model to identify themes, generate actionable suggestions,\n"
         "and summarise the feedback. Provide your OpenAI API key to run the analysis on the first 100 comments."
     )
-    api_key = st.text_input("OpenAI API Key", type="password", help="Enter your OpenAI API key here.")
+    # Retrieve API key from Streamlit secrets if available, otherwise prompt user
+    api_key = st.secrets.get("OPENAI_API_KEY", "")
+    if not api_key:
+        api_key = st.text_input(
+            "Enter your OpenAI API Key to enable AI‑powered analysis:",
+            type="password",
+            help="If left blank, the app will use local TextBlob analysis instead."
+        )
+    # If an API key is provided, set it as an environment variable for libraries that auto-discover
+    if api_key:
+        os.environ["OPENAI_API_KEY"] = api_key
+
     if st.button("Run Language Model Analysis"):
         if not api_key:
             st.error("Please enter a valid OpenAI API key before running the analysis.")
