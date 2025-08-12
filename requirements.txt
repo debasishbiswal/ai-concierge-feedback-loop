@@ -1,8 +1,10 @@
+streamlit
 pandas
 numpy
-streamlit
 textblob
 nltk
-langchain
-langchain-openai
-openai
+tiktoken
+# Pin compatible versions of LangChain and dependencies
+langchain==0.2.*
+langchain-openai>=0.1.7
+openai>=1.30.0

@@ -337,6 +337,29 @@ def main() -> None:
     if api_key:
         os.environ["OPENAI_API_KEY"] = api_key
 
+    # Display a status badge showing where the key came from and package versions
+    status_parts: List[str] = []
+    # Determine the source of the API key
+    if st.secrets.get("OPENAI_API_KEY", ""):
+        status_parts.append("Key source: secrets")
+    elif api_key:
+        status_parts.append("Key source: input")
+    else:
+        status_parts.append("Key source: none")
+    # Try to report installed package versions
+    try:
+        import langchain  # type: ignore
+        import langchain_openai  # type: ignore
+        import openai  # type: ignore
+        lc_ver = getattr(langchain, "__version__", "unknown")
+        lco_ver = getattr(langchain_openai, "__version__", "unknown")
+        oa_ver = getattr(openai, "__version__", "unknown")
+        status_parts.append(f"Versions — langchain {lc_ver}, langchain-openai {lco_ver}, openai {oa_ver}")
+    except Exception:
+        status_parts.append("Versions unavailable")
+    # Show the status as a caption to keep it unobtrusive
+    st.caption(" | ".join(status_parts))
+
     if st.button("Run Language Model Analysis"):
         if not api_key:
             st.error("Please enter a valid OpenAI API key before running the analysis.")
