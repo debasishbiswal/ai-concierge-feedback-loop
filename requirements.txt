@@ -3,3 +3,5 @@ numpy
 streamlit
 textblob
 nltk
+langchain
+langchain-openai
