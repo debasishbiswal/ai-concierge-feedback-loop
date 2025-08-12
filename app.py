@@ -20,9 +20,11 @@ from textblob import TextBlob
 # New imports for LangChain/OpenAI integration
 try:
     # The LangChain modules are optional. If not installed the app will still work
-    from langchain.chat_models import ChatOpenAI
-    from langchain.prompts import ChatPromptTemplate
-    from langchain.output_parsers import StructuredOutputParser, ResponseSchema
+    # Import ChatOpenAI from langchain_openai; import ChatPromptTemplate from langchain_core.prompts.
+    # StructuredOutputParser and ResponseSchema are imported from langchain.output_parsers.
+    from langchain_openai import ChatOpenAI  # type: ignore
+    from langchain_core.prompts import ChatPromptTemplate  # type: ignore
+    from langchain.output_parsers import StructuredOutputParser, ResponseSchema  # type: ignore
 except ImportError:
     # Stub assignments so that static analysis won't fail if LangChain is absent
     ChatOpenAI = None  # type: ignore
