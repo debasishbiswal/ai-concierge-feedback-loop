@@ -4,7 +4,7 @@ Streamlit application implementing a rubric-based analysis for guest feedback.
 This version extends the original AI Concierge app by calculating a baseline
 sentiment for each comment using TextBlob, asking an LLM to classify the
 impact of a suggested fix into qualitative categories, mapping those
-categories to numeric lift values, and deriving a predicted post‑fix sentiment.
+categories to numeric lift values, and deriving a predicted post fix sentiment.
 
 Metrics are aggregated by theme and visualised through several charts. A
 detailed explanation of each metric is provided in the UI.
@@ -31,7 +31,8 @@ __all__ = []  # explicit export list
 # Configuration and helper functions
 # -----------------------------------------------------------------------------
 
-st.set_page_config(page_title="AI Concierge — Rubric Agent", layout="wide")
+# Configure the Streamlit page with a simple title (no long dashes)
+st.set_page_config(page_title="AI Concierge: Rubric Agent", layout="wide")
 
 def get_api_key() -> str:
     """Retrieve an OpenAI API key either from Streamlit secrets or the session.
@@ -116,7 +117,8 @@ SYSTEM_PROMPT: str = (
     "Return ONLY JSON with keys: "
     "theme (string), impact (one of 'very_low','low','medium','high','very_high'), "
     "suggestion (string), confidence (number 0..1), impact_reason (string). "
-    "Theme must be short (2–4 words). "
+    # Ask the LLM to keep the theme short without using dashes in the instruction
+    "Theme must be short (between 2 and 4 words). "
     "Pick the SINGLE best theme. "
     "impact reflects how much the guest sentiment would improve if your suggestion is implemented. "
     "Do not include any text outside the JSON."
@@ -239,10 +241,12 @@ def analyse_with_rubric(df: pd.DataFrame, api_key: str, max_comments: int = 200)
 # Streamlit UI
 # -----------------------------------------------------------------------------
 
-st.title("AI Concierge — Rubric Agent (Baseline + Lift)")
-st.caption(
-    "This version computes a baseline sentiment per comment, asks the LLM for an impact category, "
-    "maps that to a numeric lift, and derives predicted_post_sentiment = clip(baseline + lift)."
+st.title("AI Concierge: Rubric Agent (Baseline + Lift)")
+st.markdown(
+    "Use this dashboard to quickly understand what's bothering guests and how to fix it. "
+    "For each comment, we measure the current mood (baseline sentiment) and ask the model how much happier a specific fix might make the guest. "
+    "We add those together to get a predicted after-fix score. By looking at both the number of complaints and the expected improvement, we highlight which themes give you the biggest return on effort. "
+    "You can filter the data by property, city and other guest attributes to focus on what matters to you."
 )
 
 # Data upload section
@@ -286,17 +290,39 @@ if data_df is not None:
 
 filtered_df: pd.DataFrame = data_df.copy() if data_df is not None else pd.DataFrame()
 if property_col:
-    # Provide a multiselect filter in the sidebar for property names
-    unique_props = sorted(data_df[property_col].dropna().astype(str).unique())
+    # Prepare sidebar filters for multiple dimensions
     st.sidebar.subheader("Data filters")
+    # Always include property filter
+    unique_props = sorted(data_df[property_col].dropna().astype(str).unique())
     selected_props = st.sidebar.multiselect(
-        "Filter by property", options=unique_props, default=unique_props
+        "Property (select one or more)", options=unique_props, default=unique_props
     )
-    # Apply filter
     filtered_df = data_df[data_df[property_col].astype(str).isin(selected_props)].copy()
 else:
-    # Show an info message when no property column is available
     filtered_df = data_df.copy() if data_df is not None else pd.DataFrame()
+
+# Additional attribute filters (city, state, property type, channel, stay purpose, loyalty tier)
+if not filtered_df.empty:
+    # Mapping from friendly label to actual column name variations
+    possible_cols = {
+        "City": ["city", "location_city", "guest_city"],
+        "State": ["state", "location_state"],
+        "Property type": ["property_type", "property_class", "hotel_type"],
+        "Channel": ["channel", "booking_channel", "feedback_channel"],
+        "Stay purpose": ["stay_purpose", "trip_purpose"],
+        "Loyalty tier": ["loyalty_tier", "membership_level"],
+    }
+    for label, candidates in possible_cols.items():
+        col_name = None
+        for cand in candidates:
+            if cand in filtered_df.columns:
+                col_name = cand
+                break
+        if col_name:
+            options = sorted(filtered_df[col_name].dropna().astype(str).unique())
+            if options:
+                selected = st.sidebar.multiselect(label, options=options, default=options)
+                filtered_df = filtered_df[filtered_df[col_name].astype(str).isin(selected)]
 
 # Show a preview of the data that will be processed
 st.subheader("Data being analysed")
@@ -318,7 +344,13 @@ st.sidebar.write("Key source:", key_source)
 max_comments = st.sidebar.slider("Max comments to analyse", min_value=20, max_value=400, value=120, step=20)
 
 # Analysis section
-st.header("2) AI‑Driven Analysis (Rubric)")
+st.header("2) AI-driven analysis")
+st.write(
+    "We read each comment with OpenAI's GPT‑4o model (falling back to GPT‑3.5‑turbo when needed). "
+    "The model picks a single theme and suggests a fix, then labels how big a difference that fix could make, ranging from very low to very high. "
+    "We translate those labels into numbers, add them to each comment's starting sentiment and get a predicted after-fix score. "
+    "By rolling up these predictions across many comments, we can see which themes come up often and promise the biggest improvements."
+)
 exp = st.expander("How are the metrics calculated?")
 with exp:
     st.markdown(
@@ -335,13 +367,13 @@ with exp:
         - very_high → 0.80
         The lift is optionally weighted by the model's confidence.
         
-        **Predicted post‑sentiment**: `clip(baseline_sentiment + lift, -1, 1)`.
+        **Predicted post sentiment**: `clip(baseline_sentiment + lift, -1, 1)`.
         
         **Complaints count**: How many comments were assigned to a theme.
         
         **Average sentiment lift**: The mean of per‑comment lifts within a theme.
         
-        **Average predicted post‑sentiment**: The mean predicted sentiment after the fix.
+        **Average predicted post sentiment**: The mean predicted sentiment after the fix.
         
         **Priority score**: `complaints_count × avg_sentiment_lift`. Bigger scores identify high‑volume, high‑impact themes.
         """
@@ -366,22 +398,26 @@ if st.button("Run rubric analysis"):
             # Visualisations with explanations
             st.subheader("Charts and insights")
 
-            # Top 10 themes by complaints count
-            top_counts = summary_df.sort_values("complaints_count", ascending=False).head(10)
-            counts_chart = (
-                alt.Chart(top_counts)
-                .mark_bar()
+            # Donut chart of theme complaint counts
+            st.subheader("Theme distribution by complaints")
+            # Use all themes or top 10 if there are many
+            donut_data = summary_df.sort_values("complaints_count", ascending=False)
+            if len(donut_data) > 10:
+                donut_data = donut_data.head(10)
+            donut_chart = (
+                alt.Chart(donut_data)
+                .mark_arc(innerRadius=60)
                 .encode(
-                    y=alt.Y("theme:N", sort="-x", title="Theme"),
-                    x=alt.X("complaints_count:Q", title="Complaints (count)"),
-                    tooltip=["theme:N", "complaints_count:Q"],
+                    theta=alt.Theta("complaints_count:Q", title="Complaints count"),
+                    color=alt.Color("theme:N", title="Theme"),
+                    tooltip=["theme:N", "complaints_count:Q"]
                 )
-                .properties(height=300)
+                .properties(height=350)
             )
-            st.altair_chart(counts_chart, use_container_width=True)
+            st.altair_chart(donut_chart, use_container_width=True)
             st.markdown(
-                "**How to read:** Longer bars indicate themes with more feedback comments. \n"
-                "Use this chart to identify the most frequently reported issues."
+                "**How to read:** Each slice shows how many comments fall under a theme. "
+                "Bigger slices mean more complaints about that theme."
             )
 
             # Top 10 themes by average sentiment lift
@@ -422,35 +458,45 @@ if st.button("Run rubric analysis"):
             st.altair_chart(priority_chart, use_container_width=True)
             st.markdown(
                 "**How to read:** Priority score multiplies complaint volume by average lift. "
-                "Themes with high scores affect many guests and offer substantial improvement potential—great candidates for action."
+                "Themes with high scores affect many guests and offer substantial improvement potential. They are great candidates for action."
             )
 
-            # Distribution of per‑comment sentiment lifts using a box plot
             if not detail_df.empty:
+                # Distribution of per comment sentiment lifts using a density curve
                 st.subheader("Distribution of predicted sentiment lifts")
-                box_chart = (
+                mean_lift = float(detail_df["sentiment_lift"].mean())
+                median_lift = float(detail_df["sentiment_lift"].median())
+                # Density estimate across the range [-1, 1]
+                density_chart = (
                     alt.Chart(detail_df)
-                    .mark_boxplot()
-                    .encode(
-                        y=alt.Y("sentiment_lift:Q", title="Sentiment lift"),
-                        tooltip=["sentiment_lift:Q"],
+                    .transform_density(
+                        "sentiment_lift",
+                        as_=["lift", "density"],
+                        extent=[-1, 1],
+                        bandwidth=0.05,
                     )
-                    .properties(height=300)
+                    .mark_area(opacity=0.3)
+                    .encode(
+                        x=alt.X("lift:Q", title="Predicted sentiment lift"),
+                        y=alt.Y("density:Q", title="Density"),
+                    )
                 )
-                st.altair_chart(box_chart, use_container_width=True)
+                # Vertical lines for mean and median
+                mean_df = pd.DataFrame({"value": [mean_lift]})
+                median_df = pd.DataFrame({"value": [median_lift]})
+                mean_rule = alt.Chart(mean_df).mark_rule(color="red").encode(x="value:Q")
+                median_rule = alt.Chart(median_df).mark_rule(color="blue").encode(x="value:Q")
+                density_combined = (density_chart + mean_rule + median_rule).properties(height=300)
+                st.altair_chart(density_combined, use_container_width=True)
                 st.markdown(
-                    "**How to read:** Each box summarises the distribution of predicted lifts across all comments. "
-                    "The bar inside the box is the median; the box shows the interquartile range. "
-                    "Points outside the whiskers represent outliers."
+                    "**How to read:** The curve shows how predicted lifts are distributed across all comments. "
+                    "The red line marks the average lift, and the blue line marks the middle value (median). "
+                    "Peaks in the curve indicate values where more comments cluster."
                 )
 
                 # Baseline vs predicted post sentiment scatter with identity line
                 st.subheader("Baseline vs predicted post sentiment")
-                # Identity line data
-                identity_df = pd.DataFrame({
-                    "x": [-1.0, 1.0],
-                    "y": [-1.0, 1.0],
-                })
+                identity_df = pd.DataFrame({"x": [-1.0, 1.0], "y": [-1.0, 1.0]})
                 scatter_layer = (
                     alt.Chart(detail_df)
                     .mark_circle(opacity=0.6)
@@ -461,9 +507,9 @@ if st.button("Run rubric analysis"):
                         tooltip=[
                             "theme:N",
                             "impact_label:N",
-                            "confidence:Q",
-                            "sentiment_lift:Q",
-                            alt.Tooltip("predicted_post_sentiment:Q", format=".3f", title="Post"),
+                            alt.Tooltip("confidence:Q", format=".2f", title="Confidence"),
+                            alt.Tooltip("sentiment_lift:Q", format=".3f", title="Lift"),
+                            alt.Tooltip("predicted_post_sentiment:Q", format=".3f", title="Predicted post"),
                             "suggestion:N",
                         ],
                     )
@@ -476,8 +522,9 @@ if st.button("Run rubric analysis"):
                 bp_chart = (scatter_layer + line_layer).properties(height=300)
                 st.altair_chart(bp_chart, use_container_width=True)
                 st.markdown(
-                    "**How to read:** Each point represents one comment. The x‑axis is the baseline sentiment; the y‑axis is the predicted sentiment after the suggested fix. "
-                    "Points above the grey diagonal line indicate an improvement. Colors denote the impact category predicted by the model."
+                    "**How to read:** Each dot is one comment. The horizontal axis shows how positive or negative the comment starts (baseline). "
+                    "The vertical axis shows where it might end up after applying the suggestion. "
+                    "Dots above the diagonal line are improvements. Colours show the impact category chosen by the model."
                 )
 
                 # Sample detail rows
@@ -497,5 +544,4 @@ if st.button("Run rubric analysis"):
                 )
 
 # Footer
-st.divider()
-st.caption("Rubric Agent v1 • " + datetime.utcnow().strftime("%Y‑%m‑%d %H:%M UTC"))
+st.caption("Rubric Agent v1 • " + datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC"))
