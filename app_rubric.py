@@ -257,6 +257,8 @@ if uploaded_file is not None:
     except Exception as e:
         st.error(f"Failed to read CSV: {e}")
         data_df = None
+
+# If no valid data uploaded, fall back to built‑in sample
 if data_df is None:
     st.info("No valid file uploaded. Using a small built‑in sample for demonstration.")
     sample = pd.DataFrame({
@@ -271,8 +273,37 @@ if data_df is None:
             "Breakfast buffet had long lines and ran out of eggs.",
         ]
     })
-    st.dataframe(sample, use_container_width=True)
     data_df = sample.copy()
+
+## Filtering and preview
+# Determine if there is a property column to filter by. We consider a few common names.
+property_col: str | None = None
+if data_df is not None:
+    for col_name in ["property", "property_name", "property_id", "hotel", "property_code"]:
+        if col_name in data_df.columns:
+            property_col = col_name
+            break
+
+filtered_df: pd.DataFrame = data_df.copy() if data_df is not None else pd.DataFrame()
+if property_col:
+    # Provide a multiselect filter in the sidebar for property names
+    unique_props = sorted(data_df[property_col].dropna().astype(str).unique())
+    st.sidebar.subheader("Data filters")
+    selected_props = st.sidebar.multiselect(
+        "Filter by property", options=unique_props, default=unique_props
+    )
+    # Apply filter
+    filtered_df = data_df[data_df[property_col].astype(str).isin(selected_props)].copy()
+else:
+    # Show an info message when no property column is available
+    filtered_df = data_df.copy() if data_df is not None else pd.DataFrame()
+
+# Show a preview of the data that will be processed
+st.subheader("Data being analysed")
+if not filtered_df.empty:
+    st.dataframe(filtered_df.head(1000), use_container_width=True)
+else:
+    st.write("No data available for analysis.")
 
 # Sidebar controls
 st.sidebar.header("Settings")
@@ -322,7 +353,8 @@ if st.button("Run rubric analysis"):
         st.error("Please provide a valid OpenAI API key in the sidebar or via Streamlit secrets.")
     else:
         with st.spinner("Running rubric‑based analysis…"):
-            summary_df, detail_df = analyse_with_rubric(data_df, api_key, max_comments=max_comments)
+            # Use the filtered dataset for analysis
+            summary_df, detail_df = analyse_with_rubric(filtered_df, api_key, max_comments=max_comments)
         if summary_df.empty:
             st.error("The analysis returned no results. Try a different dataset or increase the number of comments.")
         else:
