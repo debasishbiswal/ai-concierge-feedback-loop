@@ -16,6 +16,8 @@ import pandas as pd
 import streamlit as st
 import os
 from textblob import TextBlob
+# Import Altair for interactive charts
+import altair as alt
 
 # New imports for LangChain/OpenAI integration
 try:
@@ -303,20 +305,56 @@ def main() -> None:
         st.write("Computing sentiment scores…")
         df["sentiment"] = df["comment_text"].astype(str).apply(compute_sentiment)
 
-    # Summary statistics
+    # Summary statistics with interactive charts
     st.header("Summary Statistics")
-    col1, col2 = st.columns(2)
-    with col1:
-        complaint_counts = df["is_complaint"].value_counts().rename(index={0: "Praise", 1: "Complaint"})
-        st.subheader("Complaints vs. Praises")
-        st.bar_chart(complaint_counts)
-
-    with col2:
-        st.subheader("Average Sentiment by Property")
-        sentiment_by_property = (
-            df.groupby("property")["sentiment"].mean().sort_values(ascending=False)
+    # Compute complaint vs praise counts and convert to DataFrame for Altair
+    complaint_counts = df["is_complaint"].value_counts().rename(index={0: "Praise", 1: "Complaint"})
+    counts_df = complaint_counts.reset_index().rename(columns={"index": "Category", "is_complaint": "Count"})
+    # Interactive bar chart for complaints vs praises
+    st.subheader("Complaints vs. Praises")
+    chart_counts = (
+        alt.Chart(counts_df)
+        .mark_bar()
+        .encode(
+            x=alt.X("Category", sort=None, title="Feedback Type"),
+            y=alt.Y("Count:Q", title="Number of Comments"),
+            tooltip=["Category", "Count"]
         )
-        st.bar_chart(sentiment_by_property)
+        .properties(height=300)
+    )
+    st.altair_chart(chart_counts, use_container_width=True)
+
+    # Compute average sentiment by property and convert to DataFrame
+    sentiment_by_property = df.groupby("property")["sentiment"].mean().sort_values(ascending=False)
+    sentiment_df = sentiment_by_property.reset_index().rename(columns={"property": "Property", "sentiment": "Average Sentiment"})
+    # Interactive horizontal bar chart for average sentiment by property
+    st.subheader("Average Sentiment by Property")
+    chart_sentiment = (
+        alt.Chart(sentiment_df)
+        .mark_bar()
+        .encode(
+            y=alt.Y("Property", sort="-x", title="Property"),
+            x=alt.X("Average Sentiment:Q", title="Average Sentiment"),
+            tooltip=["Property", "Average Sentiment"]
+        )
+        .properties(height=400)
+    )
+    st.altair_chart(chart_sentiment, use_container_width=True)
+
+    # Additional interactive chart: comments by channel
+    st.subheader("Comments by Channel")
+    channel_counts = df["channel"].value_counts().reset_index().rename(columns={"index": "Channel", "channel": "Count"})
+    chart_channel = (
+        alt.Chart(channel_counts)
+        .mark_bar()
+        .encode(
+            x=alt.X("Channel", sort="-y", title="Channel"),
+            y=alt.Y("Count:Q", title="Number of Comments"),
+            tooltip=["Channel", "Count"]
+        )
+        .properties(height=300)
+    )
+    st.altair_chart(chart_channel, use_container_width=True)
 
     st.header("Sample Data")
     st.dataframe(df.head(20))
