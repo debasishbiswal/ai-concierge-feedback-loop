@@ -305,57 +305,90 @@ def main() -> None:
         st.write("Computing sentiment scores…")
         df["sentiment"] = df["comment_text"].astype(str).apply(compute_sentiment)
 
-    # Summary statistics with interactive charts
-    st.header("Summary Statistics")
-    # Compute complaint vs praise counts and convert to DataFrame for Altair
-    complaint_counts = df["is_complaint"].value_counts().rename(index={0: "Praise", 1: "Complaint"})
-    counts_df = complaint_counts.reset_index().rename(columns={"index": "Category", "is_complaint": "Count"})
-    # Interactive bar chart for complaints vs praises
-    st.subheader("Complaints vs. Praises")
-    chart_counts = (
-        alt.Chart(counts_df)
-        .mark_bar()
-        .encode(
-            x=alt.X("Category", sort=None, title="Feedback Type"),
-            y=alt.Y("Count:Q", title="Number of Comments"),
-            tooltip=["Category", "Count"]
+    # Summary statistics
+        st.header("Summary Statistics")
+        # Determine property column name if available
+        property_col = "property" if "property" in df.columns else None
+        # Display quick metrics
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Rows", int(len(df)))
+        col2.metric("Unique Properties", int(df[property_col].nunique()) if property_col else 0)
+        col3.metric("Avg sentiment", round(float(df["sentiment"].mean()), 3))
+    
+        # --- Interactive charts (Altair) ---
+        st.header("Interactive Charts")
+        # 1) Complaints vs Praises (robust to missing columns and strict typing)
+        if "is_complaint" in df.columns:
+            tmp_labels = df["is_complaint"].astype(int).map({1: "Complaints", 0: "Praises"}).fillna("Unknown")
+        else:
+            # Fallback: derive complaint label from sentiment being negative
+            tmp_labels = (df["sentiment"] < 0).map({True: "Complaints", False: "Praises"})
+        counts_df = (
+            pd.DataFrame({"label": tmp_labels})
+            .value_counts()
+            .reset_index(name="count")
+            .astype({"label": "string", "count": "int64"})
         )
-        .properties(height=300)
-    )
-    st.altair_chart(chart_counts, use_container_width=True)
-
-    # Compute average sentiment by property and convert to DataFrame
-    sentiment_by_property = df.groupby("property")["sentiment"].mean().sort_values(ascending=False)
-    sentiment_df = sentiment_by_property.reset_index().rename(columns={"property": "Property", "sentiment": "Average Sentiment"})
-    # Interactive horizontal bar chart for average sentiment by property
-    st.subheader("Average Sentiment by Property")
-    chart_sentiment = (
-        alt.Chart(sentiment_df)
-        .mark_bar()
-        .encode(
-            y=alt.Y("Property", sort="-x", title="Property"),
-            x=alt.X("Average Sentiment:Q", title="Average Sentiment"),
-            tooltip=["Property", "Average Sentiment"]
+        chart_counts = (
+            alt.Chart(counts_df)
+            .mark_bar()
+            .encode(
+                x=alt.X("label:N", sort=["Complaints", "Praises"], title=None),
+                y=alt.Y("count:Q", title="Count"),
+                tooltip=[alt.Tooltip("label:N", title="Type"), alt.Tooltip("count:Q", title="Count")],
+            )
+            .properties(height=280)
+            .interactive()
         )
-        .properties(height=400)
-    )
-    st.altair_chart(chart_sentiment, use_container_width=True)
-
-    # Additional interactive chart: comments by channel
-    st.subheader("Comments by Channel")
-    channel_counts = df["channel"].value_counts().reset_index().rename(columns={"index": "Channel", "channel": "Count"})
-    chart_channel = (
-        alt.Chart(channel_counts)
-        .mark_bar()
-        .encode(
-            x=alt.X("Channel", sort="-y", title="Channel"),
-            y=alt.Y("Count:Q", title="Number of Comments"),
-            tooltip=["Channel", "Count"]
-        )
-        .properties(height=300)
-    )
-    st.altair_chart(chart_channel, use_container_width=True)
-
+        st.altair_chart(chart_counts, use_container_width=True)
+    
+        # 2) Average sentiment by property (if available)
+        if property_col:
+            prop_avg = (
+                df.groupby(property_col, dropna=False)["sentiment"]
+                .mean()
+                .reset_index()
+                .rename(columns={"sentiment": "avg_sentiment"})
+                .astype({property_col: "string", "avg_sentiment": "float64"})
+            )
+            chart_prop = (
+                alt.Chart(prop_avg)
+                .mark_bar()
+                .encode(
+                    y=alt.Y(f"{property_col}:N", sort='-x', title="Property"),
+                    x=alt.X("avg_sentiment:Q", title="Avg sentiment"),
+                    tooltip=[
+                        alt.Tooltip(f"{property_col}:N", title="Property"),
+                        alt.Tooltip("avg_sentiment:Q", title="Avg sentiment", format=".3f"),
+                    ],
+                )
+                .properties(height=420)
+                .interactive()
+            )
+            st.altair_chart(chart_prop, use_container_width=True)
+    
+        # 3) Comments by channel (if channel column exists)
+        if "channel" in df.columns:
+            by_channel = (
+                df["channel"].astype(str)
+                .value_counts()
+                .rename_axis("channel")
+                .reset_index(name="count")
+                .astype({"channel": "string", "count": "int64"})
+            )
+            chart_channel = (
+                alt.Chart(by_channel)
+                .mark_bar()
+                .encode(
+                    x=alt.X("channel:N", sort="-y", title="Channel"),
+                    y=alt.Y("count:Q", title="Comments"),
+                    tooltip=[alt.Tooltip("channel:N"), alt.Tooltip("count:Q")],
+                )
+                .properties(height=300)
+                .interactive()
+            )
+            st.altair_chart(chart_channel, use_container_width=True)
+    
     st.header("Sample Data")
     st.dataframe(df.head(20))
 
