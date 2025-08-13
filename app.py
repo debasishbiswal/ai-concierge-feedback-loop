@@ -16,6 +16,8 @@ import pandas as pd
 import streamlit as st
 import os
 from textblob import TextBlob
+import json
+import re
 # Import Altair for interactive charts
 import altair as alt
 
@@ -85,89 +87,115 @@ def analyse_feedback_detailed(df: pd.DataFrame, api_key: str, max_comments: int 
         'avg_sentiment_lift' and 'top_suggestion'.  If no results, returns
         an empty DataFrame.
     """
-    # Use the OpenAI API directly rather than relying on LangChain for the heavy lifting.  This
-    # avoids additional dependencies and gives more control over the response format.  We
-    # instruct the model to respond with a JSON object containing the theme, suggestion and
-    # predicted sentiment lift.
-    try:
-        import json  # Standard library for parsing JSON
-        import openai  # type: ignore
-    except Exception:
-        raise Exception(
-            "OpenAI package is required for analysis. Please ensure it is installed."
-        )
+    # Helper functions for robust JSON extraction and numeric conversion.  The OpenAI API may
+    # occasionally return extra prose around the JSON object; _extract_json will pull the first
+    # JSON object from the text if direct parsing fails.  _coerce_float ensures we always get
+    # a float value from the model response.
+    def _extract_json(text: str):
+        try:
+            return json.loads(text)
+        except Exception:
+            pass
+        m = re.search(r"\{.*\}", text, flags=re.S)
+        if m:
+            try:
+                return json.loads(m.group(0))
+            except Exception:
+                return None
+        return None
+
+    def _coerce_float(x, default: float = 0.0) -> float:
+        try:
+            return float(x)
+        except Exception:
+            return default
+
     if not api_key:
         raise ValueError("An OpenAI API key is required for the detailed analysis.")
     if "comment_text" not in df.columns:
         raise ValueError("The input DataFrame must contain a 'comment_text' column.")
 
-    # Limit to a manageable number of comments to control cost and latency
-    comments: List[str] = df["comment_text"].astype(str).head(max_comments).tolist()
+    # Clean and limit comments to avoid unnecessary cost.  Skip blank rows.
+    comments_series = df["comment_text"].astype(str).str.strip()
+    comments_series = comments_series[comments_series != ""]
+    comments: List[str] = comments_series.head(max_comments).tolist()
     if not comments:
-        return pd.DataFrame()
+        return pd.DataFrame(columns=["theme", "complaints_count", "avg_sentiment_lift", "top_suggestion"])
 
-    # Configure the API key for the OpenAI client
-    openai.api_key = api_key
-    rows: List[Dict[str, object]] = []
-    # Use a widely available model for robustness.  GPT-3.5-turbo is generally
-    # available and offers a good balance of performance and cost.  GPT-4o may
-    # also be used if available.  We'll try gpt-4o first and fall back to
-    # gpt-3.5-turbo on error.
+    # Initialise the OpenAI client; if the preferred model fails we'll try a fallback.
+    try:
+        from openai import OpenAI  # type: ignore
+    except Exception:
+        raise Exception("OpenAI package is required for analysis. Please ensure it is installed.")
+
+    client = OpenAI(api_key=api_key)  # type: ignore[call-arg]
+    model_candidates = ["gpt-4o", "gpt-3.5-turbo"]
+
+    records: List[Dict[str, object]] = []
+    # Process each comment individually.  Construct a concise system prompt asking for a single
+    # theme, a suggestion and a sentiment lift.  We do not restrict the theme to a controlled
+    # vocabulary here; instead we normalise unknown themes to 'Other' later.
+    sys_prompt = (
+        "You are a hotel-operations analyst. Return ONLY JSON with keys: theme (string), suggestion (string), "
+        "sentiment_lift (number between -1 and 1). Pick ONE concise theme that best captures the feedback. "
+        "Your sentiment_lift value should reflect the predicted change in sentiment if the suggestion is implemented."
+    )
+
     for comment in comments:
-        # Construct the prompt instructing the assistant to return a JSON object
-        # with the required fields.  This prompt explicitly lists the allowed
-        # themes and asks for a numerical lift value.
-        user_prompt = (
-            f"Feedback: {comment}\n\n"
-            f"Identify the most relevant theme from this list: {', '.join(ALLOWED_THEMES)}.\n"
-            "Provide a brief actionable suggestion to address the issue and predict the sentiment improvement "
-            "as a number between -1 and 1. Respond in JSON with keys 'theme', 'suggestion', and "
-            "'predicted_sentiment_lift'."
-        )
-        # Choose which model to call.  We'll attempt gpt-4o and fall back to gpt-3.5-turbo.
-        for model_name in ["gpt-4o", "gpt-3.5-turbo"]:
+        last_err = None
+        result_json = None
+        for model_name in model_candidates:
             try:
-                response = openai.ChatCompletion.create(
-                    model=model_name,
-                    messages=[
-                        {"role": "system", "content": "You are a helpful hotel operations analyst."},
-                        {"role": "user", "content": user_prompt},
+                # Build the message payload.  Use the new response_format only on GPT-4 models to get raw JSON.
+                kwargs: Dict[str, object] = {
+                    "model": model_name,
+                    "temperature": 0,
+                    "messages": [
+                        {"role": "system", "content": sys_prompt},
+                        {"role": "user", "content": f"Feedback: {comment}"},
                     ],
-                    temperature=0,
-                )
-                content = response["choices"][0]["message"]["content"]
-                data = json.loads(content)
-                theme = str(data.get("theme", "")).strip()
-                suggestion = str(data.get("suggestion", "")).strip()
-                raw_lift = data.get("predicted_sentiment_lift", 0)
-                try:
-                    lift = float(raw_lift)
-                except Exception:
-                    lift = 0.0
-                lift = max(-1.0, min(1.0, lift))
-                if theme and theme in ALLOWED_THEMES:
-                    rows.append({"theme": theme, "sentiment_lift": lift, "suggestion": suggestion})
-                # Once successful, break the model loop
-                break
-            except Exception:
-                # Try the next model if available
+                }
+                if model_name.startswith("gpt-4"):
+                    kwargs["response_format"] = {"type": "json_object"}
+                resp = client.chat.completions.create(**kwargs)  # type: ignore
+                text = resp.choices[0].message.content  # type: ignore
+                result_json = _extract_json(text or "")
+                if result_json:
+                    break
+            except Exception as e:
+                last_err = e
                 continue
 
-    if not rows:
-        return pd.DataFrame()
+        if not result_json:
+            # Skip this comment if no JSON could be extracted.
+            continue
 
-    agent_df = pd.DataFrame(rows)
+        theme = str(result_json.get("theme", "")).strip() or "Other"
+        suggestion = str(result_json.get("suggestion", "")).strip()
+        lift = _coerce_float(result_json.get("sentiment_lift"), 0.0)
+        # Clamp to [-1, 1]
+        lift = max(-1.0, min(1.0, lift))
+
+        records.append({"theme": theme, "sentiment_lift": lift, "suggestion": suggestion})
+
+    if not records:
+        return pd.DataFrame(columns=["theme", "complaints_count", "avg_sentiment_lift", "top_suggestion"])
+
+    agent_df = pd.DataFrame.from_records(records)
+    # Aggregate results by theme; compute counts, average lift and the most common suggestion
     theme_summary = (
-        agent_df.groupby("theme", as_index=False)
+        agent_df.groupby("theme", dropna=False)
         .agg(
             complaints_count=("theme", "count"),
             avg_sentiment_lift=("sentiment_lift", "mean"),
-            top_suggestion=("suggestion", lambda x: x.value_counts().index[0]),
+            top_suggestion=("suggestion", lambda x: x.value_counts().index[0] if len(x) else ""),
         )
         .sort_values("avg_sentiment_lift", ascending=False)
-        .reset_index(drop=True)
+        .reset_index()
     )
     theme_summary["avg_sentiment_lift"] = theme_summary["avg_sentiment_lift"].round(3)
+    # Compute a priority score similar to the notebook (count * lift)
+    theme_summary["priority_score"] = (theme_summary["complaints_count"] * theme_summary["avg_sentiment_lift"]).round(3)
     return theme_summary
 
 
