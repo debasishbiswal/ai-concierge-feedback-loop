@@ -85,94 +85,67 @@ def analyse_feedback_detailed(df: pd.DataFrame, api_key: str, max_comments: int 
         'avg_sentiment_lift' and 'top_suggestion'.  If no results, returns
         an empty DataFrame.
     """
-    # Verify prerequisites
-    if ChatOpenAI is None or ChatPromptTemplate is None or StructuredOutputParser is None:
+    # Use the OpenAI API directly rather than relying on LangChain for the heavy lifting.  This
+    # avoids additional dependencies and gives more control over the response format.  We
+    # instruct the model to respond with a JSON object containing the theme, suggestion and
+    # predicted sentiment lift.
+    try:
+        import json  # Standard library for parsing JSON
+        import openai  # type: ignore
+    except Exception:
         raise Exception(
-            "LangChain and langchain-openai are required for analysis. "
-            "Please install them in your environment."
+            "OpenAI package is required for analysis. Please ensure it is installed."
         )
     if not api_key:
         raise ValueError("An OpenAI API key is required for the detailed analysis.")
     if "comment_text" not in df.columns:
         raise ValueError("The input DataFrame must contain a 'comment_text' column.")
 
-    # Prepare the subset of comments to analyse
+    # Limit to a manageable number of comments to control cost and latency
     comments: List[str] = df["comment_text"].astype(str).head(max_comments).tolist()
     if not comments:
         return pd.DataFrame()
 
-    # Define the response schema for the structured output parser
-    response_schemas = [
-        ResponseSchema(
-            name="theme",
-            description=(
-                "Predominant operational theme of the feedback. "
-                "Must be one of the following allowed values: "
-                + ", ".join(ALLOWED_THEMES)
-            ),
-        ),
-        ResponseSchema(
-            name="suggestion",
-            description="Actionable suggestion to address the theme.",
-        ),
-        ResponseSchema(
-            name="predicted_sentiment_lift",
-            description=(
-                "Predicted sentiment improvement after applying the suggestion, "
-                "as a number between -1 and 1."
-            ),
-        ),
-    ]
-    parser = StructuredOutputParser.from_response_schemas(response_schemas)
-    format_instructions: str = parser.get_format_instructions()
-
-    # Construct the prompt template.  Provide context and instruct the model to output JSON.
-    system_message = (
-        "You are a hotel operations analyst.  Given a piece of guest feedback, "
-        "identify which operational theme it relates to (choose only from the allowed "
-        "themes), propose a brief and actionable suggestion to address the issue, and "
-        "predict the expected sentiment improvement if the suggestion is implemented.  "
-        "All outputs must be in JSON format according to the provided instructions."
-    )
-    user_message = (
-        "Feedback: {comment}\n\n"
-        "Analyse the above feedback.  Use the allowed themes list: "
-        + ", ".join(ALLOWED_THEMES)
-        + ".\n"
-        + format_instructions
-    )
-    prompt = ChatPromptTemplate.from_messages([("system", system_message), ("user", user_message)])
-    llm = ChatOpenAI(api_key=api_key, model="gpt-4o-mini", temperature=0)
-
-    # Collect per-comment results
+    # Configure the API key for the OpenAI client
+    openai.api_key = api_key
     rows: List[Dict[str, object]] = []
     for comment in comments:
+        user_prompt = (
+            f"Feedback: {comment}\n\n"
+            f"Identify the most relevant theme from this list: {', '.join(ALLOWED_THEMES)}.\n"
+            "Provide a brief actionable suggestion to address the issue and predict the sentiment improvement "
+            "as a number between -1 and 1. Respond in JSON with keys 'theme', 'suggestion', and "
+            "'predicted_sentiment_lift'."
+        )
         try:
-            messages = prompt.format_prompt(comment=comment).to_messages()
-            response = llm(messages)
-            result = parser.parse(response.content)
+            response = openai.ChatCompletion.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": "You are a helpful hotel operations analyst."},
+                    {"role": "user", "content": user_prompt},
+                ],
+                temperature=0,
+            )
+            content = response["choices"][0]["message"]["content"]
+            data = json.loads(content)
+            theme = str(data.get("theme", "")).strip()
+            suggestion = str(data.get("suggestion", "")).strip()
+            raw_lift = data.get("predicted_sentiment_lift", 0)
+            try:
+                lift = float(raw_lift)
+            except Exception:
+                lift = 0.0
+            lift = max(-1.0, min(1.0, lift))
+            if theme and theme in ALLOWED_THEMES:
+                rows.append({"theme": theme, "sentiment_lift": lift, "suggestion": suggestion})
         except Exception:
-            # If parsing fails for a comment, skip it
+            # Skip this comment on any error (e.g. JSON parsing)
             continue
-        theme = str(result.get("theme", "")).strip()
-        suggestion = str(result.get("suggestion", "")).strip()
-        # Convert predicted lift to float and clamp to [-1, 1]
-        raw_lift = result.get("predicted_sentiment_lift", 0)
-        try:
-            lift = float(raw_lift)
-        except Exception:
-            lift = 0.0
-        lift = max(-1.0, min(1.0, lift))
-        # Append row only if theme is allowed; otherwise skip
-        if theme and theme in ALLOWED_THEMES:
-            rows.append({"theme": theme, "sentiment_lift": lift, "suggestion": suggestion})
 
-    # Return early if no valid rows
     if not rows:
         return pd.DataFrame()
 
     agent_df = pd.DataFrame(rows)
-    # Aggregate by theme
     theme_summary = (
         agent_df.groupby("theme", as_index=False)
         .agg(
