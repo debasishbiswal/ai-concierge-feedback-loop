@@ -653,176 +653,232 @@ st.markdown(
     "We measure each comment's starting mood and ask the model to predict how much happier the guest would be once a fix is in place. "
     "By aggregating these per-comment predictions, we surface the themes with the greatest potential impact."
 )
+
+# Restore results from session state if they exist
+summary_df = st.session_state.get("summary_df")
+detail_df = st.session_state.get("detail_df")
+plan_df_session = st.session_state.get("plan_df")
+
+# Run analysis when button clicked
 if st.button("Run analysis"):
     api_key = get_api_key()
     if not api_key:
         st.error("Please provide an OpenAI API key in the sidebar or via Streamlit secrets.")
     else:
         with st.spinner("Running analysis..."):
-            summary_df, detail_df = analyse_with_rubric(filtered_df, api_key, max_comments=max_comments)
-        if summary_df.empty:
+            new_summary_df, new_detail_df = analyse_with_rubric(filtered_df, api_key, max_comments=max_comments)
+        if new_summary_df.empty:
             st.error("The analysis returned no results. Try a different dataset or adjust filters.")
         else:
-            st.success("Analysis complete.")
-            st.subheader("Theme summary")
-            st.dataframe(summary_df, use_container_width=True)
-            # Donut chart for complaints count
-            top_themes = summary_df.sort_values("complaints_count", ascending=False).head(10)
-            if not top_themes.empty:
-                pie = (
-                    alt.Chart(top_themes)
-                    .mark_arc(innerRadius=50, outerRadius=100)
-                    .encode(
-                        theta=alt.Theta("complaints_count:Q", stack=True),
-                        color=alt.Color("theme:N", legend=None),
-                        tooltip=["theme:N", "complaints_count:Q"]
-                    )
-                )
-                st.altair_chart(pie, use_container_width=True)
-                # Explanation for donut chart
-                st.markdown(
-                    "The donut chart shows which themes receive the most feedback. "
-                    "Larger slices mean more guest comments."
-                )
-            # Lift distribution density
-            density_df = detail_df[["sentiment_lift"]].copy()
-            density_df["sentiment_lift"] = density_df["sentiment_lift"].astype(float)
-            hist = (
-                alt.Chart(density_df)
-                .transform_density(
-                    "sentiment_lift",
-                    as_=["sentiment_lift", "density"],
-                    bandwidth=0.05,
-                )
-                .mark_area(opacity=0.6)
+            # store results in session state
+            st.session_state["summary_df"] = new_summary_df
+            st.session_state["detail_df"] = new_detail_df
+            summary_df = new_summary_df
+            detail_df = new_detail_df
+            st.success("Analysis complete. Scroll down to see the results.")
+
+# Display analysis results if available
+if summary_df is not None and detail_df is not None:
+    st.subheader("Theme summary")
+    st.dataframe(summary_df, use_container_width=True)
+    # Donut chart for complaints count with legend
+    top_themes = summary_df.sort_values("complaints_count", ascending=False).head(10)
+    if not top_themes.empty:
+        pie = (
+            alt.Chart(top_themes)
+            .mark_arc(innerRadius=50, outerRadius=100)
+            .encode(
+                theta=alt.Theta("complaints_count:Q", stack=True),
+                color=alt.Color("theme:N", title="Theme"),
+                tooltip=["theme:N", "complaints_count:Q"]
+            )
+        )
+        st.altair_chart(pie, use_container_width=True)
+        st.markdown(
+            "**How to read this chart:** The donut chart shows which themes receive the most feedback. "
+            "Each slice represents a theme, and the size of the slice corresponds to the number of comments tagged with that theme. "
+            "Look for the largest slices to see which issues guests mention most often."
+        )
+    # Lift distribution density
+    density_df = detail_df[["sentiment_lift"]].copy()
+    density_df["sentiment_lift"] = density_df["sentiment_lift"].astype(float)
+    if not density_df.empty:
+        hist = (
+            alt.Chart(density_df)
+            .transform_density(
+                "sentiment_lift",
+                as_=["sentiment_lift", "density"],
+                bandwidth=0.05,
+            )
+            .mark_area(opacity=0.6)
+            .encode(
+                x=alt.X("sentiment_lift:Q", title="Predicted lift (per comment)"),
+                y=alt.Y("density:Q", title="Density"),
+            )
+        )
+        # mean and median lines
+        mean_lift = float(density_df["sentiment_lift"].mean())
+        median_lift = float(density_df["sentiment_lift"].median())
+        mean_line = alt.Chart(pd.DataFrame({"sentiment_lift": [mean_lift]})).mark_rule(color="red").encode(x="sentiment_lift:Q")
+        median_line = alt.Chart(pd.DataFrame({"sentiment_lift": [median_lift]})).mark_rule(color="blue").encode(x="sentiment_lift:Q")
+        st.altair_chart(hist + mean_line + median_line, use_container_width=True)
+        st.markdown(
+            "**How to read this chart:** This density curve shows how the predicted per-comment lifts are distributed across your dataset. "
+            "Peaks indicate where most predictions cluster. The red vertical line marks the mean lift, and the blue line marks the median. "
+            "A distribution skewed to the right suggests many comments would benefit significantly from fixes."
+        )
+    # Scatter plot baseline vs predicted
+    scatter_data = detail_df[["baseline_sentiment", "predicted_post_sentiment", "impact_label"]].copy()
+    if not scatter_data.empty:
+        scatter = (
+            alt.Chart(scatter_data)
+            .mark_circle(size=60, opacity=0.6)
+            .encode(
+                x=alt.X("baseline_sentiment:Q", title="Baseline sentiment"),
+                y=alt.Y("predicted_post_sentiment:Q", title="Predicted post sentiment"),
+                color=alt.Color("impact_label:N", title="Impact label"),
+                tooltip=["baseline_sentiment:Q", "predicted_post_sentiment:Q", "impact_label:N"],
+            )
+        )
+        identity_line = alt.Chart(pd.DataFrame({"x": [-1, 1], "y": [-1, 1]})).mark_line(strokeDash=[5, 5], color="gray").encode(x="x:Q", y="y:Q")
+        st.altair_chart(scatter + identity_line, use_container_width=True)
+        st.markdown(
+            "**How to read this chart:** Each point represents a single comment. The x‑axis shows the original (baseline) sentiment, and the y‑axis shows the predicted sentiment after applying the suggested fix. "
+            "Points above the grey dashed line indicate an improvement (post sentiment > baseline). The colour encodes the impact category assigned by the model. "
+            "Look for clusters of points above the line and far to the right — these are comments predicted to end up much happier."
+        )
+    # Memory, planning and actions
+    st.header("3) Memory & planning")
+    st.markdown(
+        "Save your analysis, generate plans for the top themes, schedule follow‑ups and create issues in your task tracker."
+    )
+    # Retrieve plan from session state or generate
+    if plan_df_session is None:
+        with st.spinner("Preparing plan..."):
+            plan_df = generate_plan(summary_df, get_api_key(), top_n=5)
+        st.session_state["plan_df"] = plan_df
+    else:
+        plan_df = plan_df_session
+    st.subheader("Action plan")
+    st.dataframe(plan_df, use_container_width=True)
+    st.markdown(
+        "**How to read this table:** Each row corresponds to a theme identified in your analysis. "
+        "The plan lists a suggested owner, key action steps, and scores for effort (1=low, 5=high) and risk (1=low, 5=high). "
+        "The ICE score (Impact ÷ Effort) helps prioritise themes: higher scores mean bigger potential gains for relatively low effort."
+    )
+    # Show plan bar chart
+    if not plan_df.empty:
+        bar = (
+            alt.Chart(plan_df)
+            .mark_bar()
+            .encode(
+                x=alt.X("ice_score:Q", title="ICE score"),
+                y=alt.Y("theme:N", sort="-x", title="Theme"),
+                tooltip=["theme:N", "ice_score:Q", "effort:Q", "risk:Q"],
+                color=alt.Color("effort:Q", title="Effort", scale=alt.Scale(scheme="blues"))
+            )
+        )
+        st.altair_chart(bar, use_container_width=True)
+        st.markdown(
+            "**How to read this chart:** Longer bars mean higher priority, because the ICE score combines a big predicted lift with a relatively low effort. "
+            "The colour intensity encodes the effort score — darker bars indicate themes that require more work."
+        )
+    # Export and memory actions
+    st.subheader("Memory and actions")
+    run_name = st.text_input("Name this run", value=st.session_state.get("run_name", "My run"))
+    st.session_state["run_name"] = run_name
+    if st.button("Save run to JSON"):
+        path = save_run_to_json(summary_df, plan_df, detail_df)
+        st.success(f"Run saved to {path}")
+        with open(path, "rb") as f:
+            st.download_button("Download run JSON", f, file_name=os.path.basename(path))
+    if st.button("Download plan as Markdown"):
+        md = convert_plan_to_markdown(plan_df)
+        st.download_button("Download Markdown", md, file_name=f"{run_name.replace(' ','_')}_plan.md")
+    if st.button("Download plan as Jira CSV"):
+        csv_str = convert_plan_to_jira_csv(plan_df)
+        st.download_button("Download Jira CSV", csv_str, file_name=f"{run_name.replace(' ','_')}_plan.csv")
+    # Calendar follow‑ups
+    st.subheader("Calendar follow‑ups")
+    col1, col2 = st.columns(2)
+    with col1:
+        start = st.date_input("Start date", value=st.session_state.get("calendar_start", datetime.utcnow().date()))
+        st.session_state["calendar_start"] = start
+    with col2:
+        spacing = st.number_input(
+            "Days between tasks", min_value=1, max_value=30,
+            value=st.session_state.get("calendar_spacing", 7), step=1
+        )
+        st.session_state["calendar_spacing"] = spacing
+    style = st.selectbox(
+        "Event style", options=["per_theme", "per_step"],
+        index=0 if st.session_state.get("calendar_style") == "per_theme" else 1,
+        format_func=lambda x: "One event per theme" if x == "per_theme" else "One event per step"
+    )
+    st.session_state["calendar_style"] = style
+    if st.button("Download calendar (.ics)"):
+        ics = generate_ics_events(plan_df, datetime.combine(start, datetime.min.time()), int(spacing), style=style)
+        st.download_button("Download .ics", ics, file_name=f"{run_name.replace(' ','_')}_calendar.ics")
+    # Simulation section
+    st.header("4) Simulation")
+    st.markdown(
+        "Pick a theme from your plan to see how fixing it could change overall sentiment. "
+        "Set adoption (how many guests benefit) and effectiveness (how well the fix works) and compare before and after."
+    )
+    if not plan_df.empty:
+        # Persist simulation inputs in session state to avoid reset on re-run
+        default_theme = st.session_state.get("sim_theme", plan_df["theme"].iloc[0])
+        sim_theme = st.selectbox("Theme to simulate", options=plan_df["theme"].tolist(), index=plan_df["theme"].tolist().index(default_theme))
+        st.session_state["sim_theme"] = sim_theme
+        adoption_pct = st.slider(
+            "Adoption rate (%)", min_value=0, max_value=100,
+            value=st.session_state.get("adoption_pct", 70), step=5
+        )
+        st.session_state["adoption_pct"] = adoption_pct
+        effectiveness_pct = st.slider(
+            "Effectiveness (%)", min_value=0, max_value=100,
+            value=st.session_state.get("effectiveness_pct", 80), step=5
+        )
+        st.session_state["effectiveness_pct"] = effectiveness_pct
+        if st.button("Run simulation"):
+            adoption = adoption_pct / 100.0
+            effectiveness = effectiveness_pct / 100.0
+            old_baseline, old_predicted, new_theme_pred, new_overall_pred = simulate_theme_impact(
+                detail_df, sim_theme, adoption, effectiveness
+            )
+            # Display metrics
+            st.write("**Overall metrics**")
+            st.table(
+                pd.DataFrame({
+                    "Metric": ["Overall baseline", "Overall predicted", "New overall predicted"],
+                    "Value": [round(old_baseline, 3), round(old_predicted, 3), round(new_overall_pred, 3)],
+                })
+            )
+            # Bar chart before vs after
+            sim_df = pd.DataFrame({
+                "Scenario": ["Before", "After"],
+                "Average sentiment": [old_predicted, new_overall_pred],
+            })
+            sim_bar = (
+                alt.Chart(sim_df)
+                .mark_bar()
                 .encode(
-                    x=alt.X("sentiment_lift:Q", title="Predicted lift (per comment)"),
-                    y=alt.Y("density:Q", title="Density"),
+                    x=alt.X("Scenario:N"),
+                    y=alt.Y("Average sentiment:Q", scale=alt.Scale(domain=[-1, 1])),
+                    color=alt.Color("Scenario:N", title="Scenario", legend=None),
+                    tooltip=["Scenario:N", "Average sentiment:Q"]
                 )
             )
-            # Add mean and median lines
-            mean_lift = float(density_df["sentiment_lift"].mean()) if not density_df.empty else 0.0
-            median_lift = float(density_df["sentiment_lift"].median()) if not density_df.empty else 0.0
-            mean_line = alt.Chart(pd.DataFrame({"sentiment_lift": [mean_lift]})).mark_rule(color="red").encode(x="sentiment_lift:Q")
-            median_line = alt.Chart(pd.DataFrame({"sentiment_lift": [median_lift]})).mark_rule(color="blue").encode(x="sentiment_lift:Q")
-            st.altair_chart(hist + mean_line + median_line, use_container_width=True)
-            st.markdown("""This curve shows how predicted lifts are distributed. Peaks indicate where most comments cluster. The red line marks the mean lift and the blue line marks the median.""")
-            # Scatter plot baseline vs predicted
-            scatter_data = detail_df[["baseline_sentiment", "predicted_post_sentiment", "impact_label"]].copy()
-            scatter = (
-                alt.Chart(scatter_data)
-                .mark_circle(size=60, opacity=0.6)
-                .encode(
-                    x=alt.X("baseline_sentiment:Q", title="Baseline sentiment"),
-                    y=alt.Y("predicted_post_sentiment:Q", title="Predicted post sentiment"),
-                    color=alt.Color("impact_label:N", title="Impact label"),
-                    tooltip=["baseline_sentiment:Q", "predicted_post_sentiment:Q", "impact_label:N"],
-                )
-            )
-            identity_line = alt.Chart(pd.DataFrame({"x": [-1, 1], "y": [-1, 1]})).mark_line(strokeDash=[5, 5], color="gray").encode(x="x:Q", y="y:Q")
-            st.altair_chart(scatter + identity_line, use_container_width=True)
-            st.markdown("""Each point compares a comment's baseline mood to its predicted post‑fix mood. Points above the grey line indicate an improvement.""")
-            # Memory, planning and actions
-            st.header("3) Memory & planning")
+            st.altair_chart(sim_bar, use_container_width=True)
             st.markdown(
-                "Save your analysis, generate plans for the top themes, schedule follow‑ups and create issues in your task tracker."
+                "**How to read this chart:** The two bars compare the average predicted sentiment before (left) and after (right) fixing the selected theme under your chosen adoption and effectiveness assumptions. "
+                "If the 'After' bar is higher, the fix leads to a higher overall predicted sentiment."
             )
-            # Generate plan button
-            with st.spinner("Preparing plan..."):
-                plan_df = generate_plan(summary_df, api_key, top_n=5)
-            st.subheader("Action plan")
-            st.dataframe(plan_df, use_container_width=True)
-            st.markdown(
-                "Plans include an effort and risk score (1=low, 5=high), an owner hint and a list of steps. ICE score = lift ÷ effort."
+            # Narrative agents output
+            impact_story, risk_story = generate_narratives(
+                sim_theme, adoption, effectiveness, summary_df, detail_df, get_api_key()
             )
-            # Show plan bar chart
-            if not plan_df.empty:
-                bar = (
-                    alt.Chart(plan_df)
-                    .mark_bar()
-                    .encode(
-                        x=alt.X("ice_score:Q", title="ICE score"),
-                        y=alt.Y("theme:N", sort="-x", title="Theme"),
-                        tooltip=["theme:N", "ice_score:Q", "effort:Q", "risk:Q"],
-                        color=alt.Color("effort:Q", title="Effort", scale=alt.Scale(scheme="blues"))
-                    )
-                )
-                st.altair_chart(bar, use_container_width=True)
-                st.markdown("""Longer bars mean higher priority (big lift and low effort). Darker colours indicate higher effort.""")
-            # Export buttons
-            st.subheader("Memory and actions")
-            run_name = st.text_input("Name this run", value="My run")
-            if st.button("Save run to JSON"):
-                path = save_run_to_json(summary_df, plan_df, detail_df)
-                st.success(f"Run saved to {path}")
-                with open(path, "rb") as f:
-                    st.download_button("Download run JSON", f, file_name=os.path.basename(path))
-            if st.button("Download plan as Markdown"):
-                md = convert_plan_to_markdown(plan_df)
-                st.download_button("Download Markdown", md, file_name=f"{run_name.replace(' ','_')}_plan.md")
-            if st.button("Download plan as Jira CSV"):
-                csv_str = convert_plan_to_jira_csv(plan_df)
-                st.download_button("Download Jira CSV", csv_str, file_name=f"{run_name.replace(' ','_')}_plan.csv")
-            # Calendar follow‑ups
-            st.subheader("Calendar follow‑ups")
-            col1, col2 = st.columns(2)
-            with col1:
-                start = st.date_input("Start date", value=datetime.utcnow().date())
-            with col2:
-                spacing = st.number_input("Days between tasks", min_value=1, max_value=30, value=7)
-            style = st.selectbox("Event style", options=["per_theme", "per_step"], format_func=lambda x: "One event per theme" if x == "per_theme" else "One event per step")
-            if st.button("Download calendar (.ics)"):
-                ics = generate_ics_events(plan_df, datetime.combine(start, datetime.min.time()), int(spacing), style=style)
-                st.download_button("Download .ics", ics, file_name=f"{run_name.replace(' ','_')}_calendar.ics")
-            # Simulation
-            st.header("4) Simulation")
-            st.markdown(
-                "Pick a theme from your plan to see how fixing it could change overall sentiment. Set adoption and effectiveness and compare before and after."
-            )
-            if not plan_df.empty:
-                sim_theme = st.selectbox("Theme to simulate", options=plan_df["theme"].tolist())
-                adoption_pct = st.slider("Adoption rate (%)", min_value=0, max_value=100, value=70, step=5)
-                effectiveness_pct = st.slider("Effectiveness (%)", min_value=0, max_value=100, value=80, step=5)
-                if st.button("Run simulation"):
-                    adoption = adoption_pct / 100.0
-                    effectiveness = effectiveness_pct / 100.0
-                    old_baseline, old_predicted, new_theme_pred, new_overall_pred = simulate_theme_impact(
-                        detail_df, sim_theme, adoption, effectiveness
-                    )
-                    # Show metrics
-                    st.write("**Overall metrics**")
-                    st.table(
-                        pd.DataFrame({
-                            "Metric": ["Overall baseline", "Overall predicted", "New overall predicted"],
-                            "Value": [round(old_baseline, 3), round(old_predicted, 3), round(new_overall_pred, 3)],
-                        })
-                    )
-                    # Bar chart for the chosen theme
-                    sim_df = pd.DataFrame({
-                        "Scenario": ["Before", "After"],
-                        "Average sentiment": [old_predicted, new_overall_pred],
-                    })
-                    sim_bar = (
-                        alt.Chart(sim_df)
-                        .mark_bar()
-                        .encode(
-                            x=alt.X("Scenario:N"),
-                            y=alt.Y("Average sentiment:Q", scale=alt.Scale(domain=[-1, 1])),
-                            color=alt.Color("Scenario:N", legend=None),
-                            tooltip=["Scenario:N", "Average sentiment:Q"]
-                        )
-                    )
-                    st.altair_chart(sim_bar, use_container_width=True)
-                    # Explain the simulation bar chart in plain language
-                    st.markdown(
-                        "The bar chart compares the average predicted sentiment before and after fixing the selected theme. "
-                        "A taller bar in the 'After' column means that, on average, guests would feel better once the fix is in place."
-                    )
-                    # Narratives
-                    impact_story, risk_story = generate_narratives(
-                        sim_theme, adoption, effectiveness, summary_df, detail_df, api_key
-                    )
-                    if impact_story:
-                        st.write("**Impact Analyst:**", impact_story)
-                    if risk_story:
-                        st.write("**Risk Reviewer:**", risk_story)
+            if impact_story:
+                st.write("**Impact Analyst:**", impact_story)
+            if risk_story:
+                st.write("**Risk Reviewer:**", risk_story)
