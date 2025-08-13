@@ -434,22 +434,58 @@ def main() -> None:
     st.caption(" | ".join(status_parts))
 
     if st.button("Run Language Model Analysis"):
+        """
+        When the user clicks this button, run a detailed analysis of the uploaded or synthetic
+        dataset using the language model.  This analysis processes a subset of comments
+        individually to extract themes, suggestions and predicted sentiment lift.  The results
+        are aggregated and visualised.
+        """
         if not api_key:
             st.error("Please enter a valid OpenAI API key before running the analysis.")
         else:
             try:
-                with st.spinner("Running analysis with LangChain and OpenAI…"):
-                    result = analyse_feedback(df, api_key)
+                # Run a detailed per-comment analysis.  Limit to 50 comments to control cost.
+                with st.spinner("Running detailed analysis with LangChain and OpenAI…"):
+                    theme_summary = analyse_feedback_detailed(df, api_key, max_comments=50)
                 st.success("Analysis complete.")
-                st.subheader("Top Themes")
-                # Display as bullet points for readability
-                for i, theme in enumerate(result.get("themes", []), 1):
-                    st.markdown(f"{i}. {theme}")
-                st.subheader("Actionable Suggestions")
-                for i, sugg in enumerate(result.get("suggestions", []), 1):
-                    st.markdown(f"{i}. {sugg}")
-                st.subheader("Overall Summary")
-                st.write(result.get("overall_summary", "No summary returned."))
+                if theme_summary.empty:
+                    st.warning("The analysis returned no results. Try uploading a different dataset or increasing the number of comments.")
+                else:
+                    # Display the aggregated theme summary
+                    st.subheader("Theme Summary (Aggregated)")
+                    st.dataframe(theme_summary, use_container_width=True)
+
+                    # Compute a priority score (complaints_count * avg_sentiment_lift) for ranking
+                    ts = theme_summary.copy()
+                    ts["priority_score"] = ts["complaints_count"] * ts["avg_sentiment_lift"]
+                    ts_top = ts.sort_values("priority_score", ascending=False).head(10).reset_index(drop=True)
+
+                    # Show a bar chart of average sentiment lift per theme
+                    st.subheader("Average Sentiment Lift by Theme")
+                    chart_lift = (
+                        alt.Chart(theme_summary)
+                        .mark_bar()
+                        .encode(
+                            x=alt.X("avg_sentiment_lift:Q", title="Average Sentiment Lift"),
+                            y=alt.Y("theme:N", sort="-x", title="Theme"),
+                            tooltip=["theme", "avg_sentiment_lift", "complaints_count", "top_suggestion"]
+                        )
+                    )
+                    st.altair_chart(chart_lift, use_container_width=True)
+
+                    # Show top themes by priority score
+                    st.subheader("Top Themes by Impact (Priority Score)")
+                    st.dataframe(ts_top, use_container_width=True)
+                    chart_priority = (
+                        alt.Chart(ts_top)
+                        .mark_bar()
+                        .encode(
+                            x=alt.X("priority_score:Q", title="Priority Score"),
+                            y=alt.Y("theme:N", sort="-x", title="Theme"),
+                            tooltip=["theme", "priority_score", "complaints_count", "avg_sentiment_lift"]
+                        )
+                    )
+                    st.altair_chart(chart_priority, use_container_width=True)
             except Exception as exc:
                 st.error(f"An error occurred during analysis: {exc}")
 
