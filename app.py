@@ -34,6 +34,158 @@ except ImportError:
     StructuredOutputParser = None  # type: ignore
     ResponseSchema = None  # type: ignore
 
+# -----------------------------------------------------------------------------
+# Theme vocabulary and LLM analysis helper
+# -----------------------------------------------------------------------------
+
+# Controlled vocabulary of operational themes used to classify feedback.  This list should
+# reflect the most common issues surfaced in the original notebook.  If you modify this
+# list, be sure to update the prompt in analyse_feedback_detailed accordingly.
+ALLOWED_THEMES: List[str] = [
+    "Breakfast service",
+    "Parking fees",
+    "WiFi reliability",
+    "Check-in wait times",
+    "Gym hours",
+    "Pool hours",
+    "Air conditioning issues",
+    "Room service delays",
+    "Room cleanliness",
+    "Towel service",
+    "Room amenities",
+    "Housekeeping",
+    "Staff assistance",
+    "Pillow requests",
+    "Toiletries availability",
+    "Concierge service",
+]
+
+def analyse_feedback_detailed(df: pd.DataFrame, api_key: str, max_comments: int = 50) -> pd.DataFrame:
+    """
+    Analyse up to `max_comments` comments from the provided DataFrame using a language model.
+
+    Each comment is processed individually via LangChain and OpenAI.  For each piece of feedback
+    the model returns a theme (from the controlled vocabulary), an actionable suggestion, and a
+    predicted sentiment lift (between -1 and 1).  The results are aggregated by theme to produce
+    counts, average lifts and the most common suggestion.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        Input feedback data.  Must contain a 'comment_text' column.
+    api_key : str
+        OpenAI API key to use with ChatOpenAI.  Will raise if no key is supplied.
+    max_comments : int, optional
+        Maximum number of comments to analyse.  Reduces cost and latency.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Aggregated summary with columns: 'theme', 'complaints_count',
+        'avg_sentiment_lift' and 'top_suggestion'.  If no results, returns
+        an empty DataFrame.
+    """
+    # Verify prerequisites
+    if ChatOpenAI is None or ChatPromptTemplate is None or StructuredOutputParser is None:
+        raise Exception(
+            "LangChain and langchain-openai are required for analysis. "
+            "Please install them in your environment."
+        )
+    if not api_key:
+        raise ValueError("An OpenAI API key is required for the detailed analysis.")
+    if "comment_text" not in df.columns:
+        raise ValueError("The input DataFrame must contain a 'comment_text' column.")
+
+    # Prepare the subset of comments to analyse
+    comments: List[str] = df["comment_text"].astype(str).head(max_comments).tolist()
+    if not comments:
+        return pd.DataFrame()
+
+    # Define the response schema for the structured output parser
+    response_schemas = [
+        ResponseSchema(
+            name="theme",
+            description=(
+                "Predominant operational theme of the feedback. "
+                "Must be one of the following allowed values: "
+                + ", ".join(ALLOWED_THEMES)
+            ),
+        ),
+        ResponseSchema(
+            name="suggestion",
+            description="Actionable suggestion to address the theme.",
+        ),
+        ResponseSchema(
+            name="predicted_sentiment_lift",
+            description=(
+                "Predicted sentiment improvement after applying the suggestion, "
+                "as a number between -1 and 1."
+            ),
+        ),
+    ]
+    parser = StructuredOutputParser.from_response_schemas(response_schemas)
+    format_instructions: str = parser.get_format_instructions()
+
+    # Construct the prompt template.  Provide context and instruct the model to output JSON.
+    system_message = (
+        "You are a hotel operations analyst.  Given a piece of guest feedback, "
+        "identify which operational theme it relates to (choose only from the allowed "
+        "themes), propose a brief and actionable suggestion to address the issue, and "
+        "predict the expected sentiment improvement if the suggestion is implemented.  "
+        "All outputs must be in JSON format according to the provided instructions."
+    )
+    user_message = (
+        "Feedback: {comment}\n\n"
+        "Analyse the above feedback.  Use the allowed themes list: "
+        + ", ".join(ALLOWED_THEMES)
+        + ".\n"
+        + format_instructions
+    )
+    prompt = ChatPromptTemplate.from_messages([("system", system_message), ("user", user_message)])
+    llm = ChatOpenAI(api_key=api_key, model="gpt-4o-mini", temperature=0)
+
+    # Collect per-comment results
+    rows: List[Dict[str, object]] = []
+    for comment in comments:
+        try:
+            messages = prompt.format_prompt(comment=comment).to_messages()
+            response = llm(messages)
+            result = parser.parse(response.content)
+        except Exception:
+            # If parsing fails for a comment, skip it
+            continue
+        theme = str(result.get("theme", "")).strip()
+        suggestion = str(result.get("suggestion", "")).strip()
+        # Convert predicted lift to float and clamp to [-1, 1]
+        raw_lift = result.get("predicted_sentiment_lift", 0)
+        try:
+            lift = float(raw_lift)
+        except Exception:
+            lift = 0.0
+        lift = max(-1.0, min(1.0, lift))
+        # Append row only if theme is allowed; otherwise skip
+        if theme and theme in ALLOWED_THEMES:
+            rows.append({"theme": theme, "sentiment_lift": lift, "suggestion": suggestion})
+
+    # Return early if no valid rows
+    if not rows:
+        return pd.DataFrame()
+
+    agent_df = pd.DataFrame(rows)
+    # Aggregate by theme
+    theme_summary = (
+        agent_df.groupby("theme", as_index=False)
+        .agg(
+            complaints_count=("theme", "count"),
+            avg_sentiment_lift=("sentiment_lift", "mean"),
+            top_suggestion=("suggestion", lambda x: x.value_counts().index[0]),
+        )
+        .sort_values("avg_sentiment_lift", ascending=False)
+        .reset_index(drop=True)
+    )
+    theme_summary["avg_sentiment_lift"] = theme_summary["avg_sentiment_lift"].round(3)
+    return theme_summary
+
 
 # -----------------------------------------------------------------------------
 # Configuration and data pools (copied from the original notebook)
