@@ -679,7 +679,11 @@ if st.button("Run analysis"):
                     )
                 )
                 st.altair_chart(pie, use_container_width=True)
-                st.markdown("""The donut chart shows which themes receive the most feedback. Larger slices mean more guest comments.")
+                # Explanation for donut chart
+                st.markdown(
+                    "The donut chart shows which themes receive the most feedback. "
+                    "Larger slices mean more guest comments."
+                )
             # Lift distribution density
             density_df = detail_df[["sentiment_lift"]].copy()
             density_df["sentiment_lift"] = density_df["sentiment_lift"].astype(float)
