@@ -362,31 +362,50 @@ if st.button("Run rubric analysis"):
             # Display theme summary
             st.subheader("Theme‑level summary")
             st.dataframe(summary_df, use_container_width=True)
-            # Charts
-            st.subheader("Visualisations")
-            # Average lift per theme
-            lift_chart = (
-                alt.Chart(summary_df)
+
+            # Visualisations with explanations
+            st.subheader("Charts and insights")
+
+            # Top 10 themes by complaints count
+            top_counts = summary_df.sort_values("complaints_count", ascending=False).head(10)
+            counts_chart = (
+                alt.Chart(top_counts)
+                .mark_bar()
+                .encode(
+                    y=alt.Y("theme:N", sort="-x", title="Theme"),
+                    x=alt.X("complaints_count:Q", title="Complaints (count)"),
+                    tooltip=["theme:N", "complaints_count:Q"],
+                )
+                .properties(height=300)
+            )
+            st.altair_chart(counts_chart, use_container_width=True)
+            st.markdown(
+                "**How to read:** Longer bars indicate themes with more feedback comments. \n"
+                "Use this chart to identify the most frequently reported issues."
+            )
+
+            # Top 10 themes by average sentiment lift
+            top_lifts = summary_df.sort_values("avg_sentiment_lift", ascending=False).head(10)
+            lifts_chart = (
+                alt.Chart(top_lifts)
                 .mark_bar()
                 .encode(
                     y=alt.Y("theme:N", sort="-x", title="Theme"),
                     x=alt.X("avg_sentiment_lift:Q", title="Average sentiment lift"),
-                    tooltip=[
-                        "theme:N",
-                        alt.Tooltip("avg_sentiment_lift:Q", format=".3f", title="Avg lift"),
-                        "complaints_count:Q",
-                        alt.Tooltip("avg_predicted_post_sentiment:Q", format=".3f", title="Avg post"),
-                        "impact_mode:N",
-                    ],
+                    tooltip=["theme:N", alt.Tooltip("avg_sentiment_lift:Q", format=".3f", title="Avg lift")],
                 )
-                .properties(height=360)
+                .properties(height=300)
             )
-            st.altair_chart(lift_chart, use_container_width=True)
+            st.altair_chart(lifts_chart, use_container_width=True)
+            st.markdown(
+                "**How to read:** Each bar shows the average predicted improvement (lift) for a theme. "
+                "Higher values mean the suggested fixes are expected to have a bigger positive impact on guest sentiment."
+            )
 
-            # Priority score bar chart (top 10)
-            top10 = summary_df.sort_values("priority_score", ascending=False).head(10)
+            # Top 10 themes by priority score (complaints × lift)
+            top_priority = summary_df.sort_values("priority_score", ascending=False).head(10)
             priority_chart = (
-                alt.Chart(top10)
+                alt.Chart(top_priority)
                 .mark_bar()
                 .encode(
                     y=alt.Y("theme:N", sort="-x", title="Theme"),
@@ -398,49 +417,41 @@ if st.button("Run rubric analysis"):
                         alt.Tooltip("priority_score:Q", format=".3f", title="Priority"),
                     ],
                 )
-                .properties(height=320)
+                .properties(height=300)
             )
             st.altair_chart(priority_chart, use_container_width=True)
-
-            # Scatter: volume vs avg lift, size by volume, colour by impact_mode
-            scatter_chart = (
-                alt.Chart(summary_df)
-                .mark_circle()
-                .encode(
-                    x=alt.X("complaints_count:Q", title="Complaints (count)"),
-                    y=alt.Y("avg_sentiment_lift:Q", title="Average lift"),
-                    size=alt.Size("complaints_count:Q", legend=None, title="Volume"),
-                    color=alt.Color("impact_mode:N", title="Dominant impact"),
-                    tooltip=[
-                        "theme:N",
-                        "complaints_count:Q",
-                        alt.Tooltip("avg_sentiment_lift:Q", format=".3f", title="Avg lift"),
-                        alt.Tooltip("avg_predicted_post_sentiment:Q", format=".3f", title="Avg post"),
-                        "impact_mode:N",
-                    ],
-                )
-                .properties(height=320)
+            st.markdown(
+                "**How to read:** Priority score multiplies complaint volume by average lift. "
+                "Themes with high scores affect many guests and offer substantial improvement potential—great candidates for action."
             )
-            st.altair_chart(scatter_chart, use_container_width=True)
 
-            # Histogram of per‑comment lifts
+            # Distribution of per‑comment sentiment lifts using a box plot
             if not detail_df.empty:
-                st.subheader("Lift distribution (per comment)")
-                hist_chart = (
+                st.subheader("Distribution of predicted sentiment lifts")
+                box_chart = (
                     alt.Chart(detail_df)
-                    .mark_bar()
+                    .mark_boxplot()
                     .encode(
-                        x=alt.X("sentiment_lift:Q", bin=alt.Bin(maxbins=30), title="Per‑comment lift"),
-                        y=alt.Y("count()", title="Frequency"),
-                        tooltip=[alt.Tooltip("count()", title="Count")],
+                        y=alt.Y("sentiment_lift:Q", title="Sentiment lift"),
+                        tooltip=["sentiment_lift:Q"],
                     )
-                    .properties(height=240)
+                    .properties(height=300)
                 )
-                st.altair_chart(hist_chart, use_container_width=True)
+                st.altair_chart(box_chart, use_container_width=True)
+                st.markdown(
+                    "**How to read:** Each box summarises the distribution of predicted lifts across all comments. "
+                    "The bar inside the box is the median; the box shows the interquartile range. "
+                    "Points outside the whiskers represent outliers."
+                )
 
-                # Baseline vs predicted post scatter
+                # Baseline vs predicted post sentiment scatter with identity line
                 st.subheader("Baseline vs predicted post sentiment")
-                bp_chart = (
+                # Identity line data
+                identity_df = pd.DataFrame({
+                    "x": [-1.0, 1.0],
+                    "y": [-1.0, 1.0],
+                })
+                scatter_layer = (
                     alt.Chart(detail_df)
                     .mark_circle(opacity=0.6)
                     .encode(
@@ -456,9 +467,18 @@ if st.button("Run rubric analysis"):
                             "suggestion:N",
                         ],
                     )
-                    .properties(height=320)
                 )
+                line_layer = (
+                    alt.Chart(identity_df)
+                    .mark_line(color="gray", strokeDash=[4,4])
+                    .encode(x="x", y="y")
+                )
+                bp_chart = (scatter_layer + line_layer).properties(height=300)
                 st.altair_chart(bp_chart, use_container_width=True)
+                st.markdown(
+                    "**How to read:** Each point represents one comment. The x‑axis is the baseline sentiment; the y‑axis is the predicted sentiment after the suggested fix. "
+                    "Points above the grey diagonal line indicate an improvement. Colors denote the impact category predicted by the model."
+                )
 
                 # Sample detail rows
                 st.subheader("Sample of analysed comments")
