@@ -109,7 +109,14 @@ def analyse_feedback_detailed(df: pd.DataFrame, api_key: str, max_comments: int 
     # Configure the API key for the OpenAI client
     openai.api_key = api_key
     rows: List[Dict[str, object]] = []
+    # Use a widely available model for robustness.  GPT-3.5-turbo is generally
+    # available and offers a good balance of performance and cost.  GPT-4o may
+    # also be used if available.  We'll try gpt-4o first and fall back to
+    # gpt-3.5-turbo on error.
     for comment in comments:
+        # Construct the prompt instructing the assistant to return a JSON object
+        # with the required fields.  This prompt explicitly lists the allowed
+        # themes and asks for a numerical lift value.
         user_prompt = (
             f"Feedback: {comment}\n\n"
             f"Identify the most relevant theme from this list: {', '.join(ALLOWED_THEMES)}.\n"
@@ -117,30 +124,34 @@ def analyse_feedback_detailed(df: pd.DataFrame, api_key: str, max_comments: int 
             "as a number between -1 and 1. Respond in JSON with keys 'theme', 'suggestion', and "
             "'predicted_sentiment_lift'."
         )
-        try:
-            response = openai.ChatCompletion.create(
-                model="gpt-4o-mini",
-                messages=[
-                    {"role": "system", "content": "You are a helpful hotel operations analyst."},
-                    {"role": "user", "content": user_prompt},
-                ],
-                temperature=0,
-            )
-            content = response["choices"][0]["message"]["content"]
-            data = json.loads(content)
-            theme = str(data.get("theme", "")).strip()
-            suggestion = str(data.get("suggestion", "")).strip()
-            raw_lift = data.get("predicted_sentiment_lift", 0)
+        # Choose which model to call.  We'll attempt gpt-4o and fall back to gpt-3.5-turbo.
+        for model_name in ["gpt-4o", "gpt-3.5-turbo"]:
             try:
-                lift = float(raw_lift)
+                response = openai.ChatCompletion.create(
+                    model=model_name,
+                    messages=[
+                        {"role": "system", "content": "You are a helpful hotel operations analyst."},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    temperature=0,
+                )
+                content = response["choices"][0]["message"]["content"]
+                data = json.loads(content)
+                theme = str(data.get("theme", "")).strip()
+                suggestion = str(data.get("suggestion", "")).strip()
+                raw_lift = data.get("predicted_sentiment_lift", 0)
+                try:
+                    lift = float(raw_lift)
+                except Exception:
+                    lift = 0.0
+                lift = max(-1.0, min(1.0, lift))
+                if theme and theme in ALLOWED_THEMES:
+                    rows.append({"theme": theme, "sentiment_lift": lift, "suggestion": suggestion})
+                # Once successful, break the model loop
+                break
             except Exception:
-                lift = 0.0
-            lift = max(-1.0, min(1.0, lift))
-            if theme and theme in ALLOWED_THEMES:
-                rows.append({"theme": theme, "sentiment_lift": lift, "suggestion": suggestion})
-        except Exception:
-            # Skip this comment on any error (e.g. JSON parsing)
-            continue
+                # Try the next model if available
+                continue
 
     if not rows:
         return pd.DataFrame()
