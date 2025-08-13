@@ -809,9 +809,10 @@ if st.button("Run analysis"):
                         )
                     )
                     st.altair_chart(sim_bar, use_container_width=True)
+                    # Explain the simulation bar chart in plain language
                     st.markdown(
-                        """The bar chart compares the average predicted sentiment before and after fixing the selected theme. "
-                        "A higher bar after indicates that the fix would improve guest sentiment."""
+                        "The bar chart compares the average predicted sentiment before and after fixing the selected theme. "
+                        "A taller bar in the 'After' column means that, on average, guests would feel better once the fix is in place."
                     )
                     # Narratives
                     impact_story, risk_story = generate_narratives(
